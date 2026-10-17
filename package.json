@@ -1,0 +1,33 @@
+{
+  "name": "claude-espn-ff",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Remote MCP connector that lets Claude manage an ESPN Fantasy Football team. Deploys to Netlify Functions.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build": "npm run typecheck",
+    "dev": "npx --yes netlify-cli@latest dev",
+    "smoke": "node --env-file-if-exists=.env --import tsx scripts/smoke.ts",
+    "token": "node --env-file-if-exists=.env --import tsx scripts/mint-token.ts",
+    "mcp-client": "node --env-file-if-exists=.env --import tsx scripts/mcp-client.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.3.1",
+    "@netlify/blobs": "^11.1.4",
+    "@netlify/functions": "^6.0.2",
+    "zod": "^4.2.0"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "^2.3.1",
+    "@types/node": "^22.20.5",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.5"
+  }
+}

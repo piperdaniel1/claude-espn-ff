@@ -1,0 +1,15 @@
+# Netlify configuration for the ESPN Fantasy Football MCP connector.
+#
+# Everything is served by a single Netlify Function (netlify/functions/mcp.mts):
+# the MCP endpoint, the OAuth endpoints Claude uses to sign in, and the
+# well-known discovery documents. There is no front-end build.
+
+[build]
+  command = "npm run build"
+  publish = "public"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+[functions]
+  node_bundler = "esbuild"
