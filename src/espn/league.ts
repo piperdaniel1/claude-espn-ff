@@ -309,7 +309,9 @@ export class LeagueService {
     ]);
     const now = this.now;
     const status = league.status ?? {};
-    const currentScoringPeriod = league.scoringPeriodId ?? status.latestScoringPeriod ?? 1;
+    // ESPN echoes a requested scoringPeriodId back at the top level, so the live
+    // week has to come from status.latestScoringPeriod.
+    const currentScoringPeriod = status.latestScoringPeriod ?? league.scoringPeriodId ?? 1;
     const scoringPeriodId = week ?? currentScoringPeriod;
     const isCurrentWeek = scoringPeriodId === currentScoringPeriod;
     const isFutureWeek = scoringPeriodId > currentScoringPeriod;
@@ -578,8 +580,10 @@ export class LeagueService {
     if (scored.length === 0) return [];
     // ESPN only returns players in the league's universe, so fetch more candidates than needed.
     const details = await this.getPlayers(scored.map((x) => x.p.id), week);
-    const order = new Map(scored.map((x, i) => [x.p.id, i]));
-    return details.sort((a, b) => (order.get(a.id) ?? 99) - (order.get(b.id) ?? 99)).slice(0, limit);
+    const scoreOf = new Map(scored.map((x) => [x.p.id, x.score]));
+    return details
+      .sort((a, b) => (scoreOf.get(b.id) ?? 0) - (scoreOf.get(a.id) ?? 0) || (b.percentOwned ?? 0) - (a.percentOwned ?? 0) || a.name.localeCompare(b.name))
+      .slice(0, limit);
   }
 
   // ---- Transactions ---------------------------------------------------------------
@@ -671,9 +675,11 @@ export class LeagueService {
     } else if (t.type === "WAIVER_ERROR") {
       note = "Waiver claim failed (outbid, lower priority, or roster problem).";
     } else if (!t.status) {
-      note = "ESPN returned no status for this record.";
+      note = "ESPN returned a stub record with no status.";
     }
-    if (items.length === 0 && t.type.startsWith("TRADE")) note = `${note ? `${note} ` : ""}ESPN returned no player details for this record.`;
+    if (items.length === 0 && t.type.startsWith("TRADE")) {
+      note = !t.status ? "ESPN returned a stub record with no status or player details; see the related trade record." : `${note ? `${note} ` : ""}ESPN returned no player details for this record.`;
+    }
     return {
       id: t.id,
       type: t.type,

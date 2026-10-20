@@ -111,7 +111,9 @@ function respond(mock: MockEspn, urlStr: string, method: string, headers: Record
   }
 
   if (views.includes("mTeam") || views.includes("mRoster") || views.includes("mSettings")) {
-    return json(mock.league);
+    // ESPN echoes the requested scoringPeriodId at the top level of the response.
+    const requested = url.searchParams.get("scoringPeriodId");
+    return json(requested ? { ...mock.league, scoringPeriodId: Number(requested) } : mock.league);
   }
 
   return json({ messages: ["Unhandled mock route", urlStr] }, 500);

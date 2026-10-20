@@ -156,6 +156,12 @@ describe("LeagueService snapshot", () => {
     const next = await league.getSnapshot(WEEK + 1);
     expect(next.isCurrentWeek).toBe(false);
     expect(next.isFutureWeek).toBe(true);
+    expect(next.currentScoringPeriod).toBe(WEEK);
+    const explicitCurrent = await league.getSnapshot(WEEK);
+    expect(explicitCurrent.isCurrentWeek).toBe(true);
+    const past = await league.getSnapshot(WEEK - 1);
+    expect(past.isCurrentWeek).toBe(false);
+    expect(past.isFutureWeek).toBe(false);
     const charlieNow = league.lineupCandidates(now).find((c) => c.playerId === 103)!;
     const charlieNext = league.lineupCandidates(next).find((c) => c.playerId === 103)!;
     expect(charlieNow.injuryStatus).toBe("OUT");
