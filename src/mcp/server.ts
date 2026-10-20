@@ -88,7 +88,7 @@ function compactPlayer(p: PlayerInfo) {
     pts_week: p.actualWeek,
     season_pts: p.seasonPoints,
     season_avg: p.seasonAvg,
-    season_proj: p.seasonProjected,
+    ros_proj: p.seasonProjected,
     pos_rank: p.positionRank,
     pct_owned: p.percentOwned,
     pct_started: p.percentStarted,
@@ -136,6 +136,7 @@ function compactTransaction(t: TransactionInfo) {
     processed: t.processed,
     expires: t.expires,
     week: t.scoringPeriodId,
+    note: t.note,
     items: t.items.map((i) => `${i.action} ${i.player}${i.fromTeam ? ` from ${i.fromTeam}` : ""}${i.toTeam ? ` to ${i.toTeam}` : ""}${i.toSlot ? ` -> ${i.toSlot}` : ""}`),
     item_player_ids: t.items.map((i) => ({ action: i.action, player_id: i.playerId, player: i.player })),
   };
@@ -146,6 +147,7 @@ function lineupIssues(snap: Snapshot): string[] {
   const starters = snap.myTeam.roster.filter((p) => p.slotId !== SLOT_BENCH && p.slotId !== SLOT_IR);
   for (const p of starters) {
     if (p.game.bye) issues.push(`${p.name} (${p.slot}) is on BYE`);
+    else if (!snap.isCurrentWeek) continue; // injury designations describe today, not other weeks
     else if (["OUT", "INJURY_RESERVE", "SUSPENSION"].includes(p.injuryStatus)) issues.push(`${p.name} (${p.slot}) is ${p.injuryStatus}`);
     else if (p.injuryStatus === "DOUBTFUL") issues.push(`${p.name} (${p.slot}) is DOUBTFUL`);
     else if (p.injuryStatus === "QUESTIONABLE") issues.push(`${p.name} (${p.slot}) is QUESTIONABLE`);
@@ -171,6 +173,36 @@ function nextKickoffInfo(snap: Snapshot) {
       : null,
     my_locked_players: snap.myTeam.roster.filter((p) => p.locked).map((p) => `${p.name} (${p.slot})`),
   };
+}
+
+const GAME_DURATION_MS = 4.5 * 3600_000;
+
+function gameStatus(game: { date: number; statsOfficial?: boolean }, nowMs: number): "scheduled" | "in_progress" | "final" {
+  if (game.date > nowMs) return "scheduled";
+  if (game.statsOfficial || nowMs - game.date > GAME_DURATION_MS) return "final";
+  return "in_progress";
+}
+
+/** ESPN rarely fills waiverNextExecutionDate; estimate it from the last run and the process days. */
+function estimateNextWaiverRun(snap: Snapshot, tz: string): { at: string | null; estimated: boolean } {
+  if (snap.status.waiverNextExecutionDate) return { at: formatDateTime(snap.status.waiverNextExecutionDate, tz), estimated: false };
+  const last = snap.status.waiverLastExecutionDate;
+  const days = snap.settings.waivers.processDays.map((d) => d.toUpperCase());
+  if (!last || days.length === 0) return { at: null, estimated: true };
+  const nowMs = snap.now.getTime();
+  for (let k = 1; k <= 8; k++) {
+    const candidate = last + k * 86_400_000;
+    if (candidate <= nowMs) continue;
+    if (days.includes(weekdayName(candidate, tz).toUpperCase())) return { at: formatDateTime(candidate, tz), estimated: true };
+  }
+  return { at: null, estimated: true };
+}
+
+function weekNote(snap: Snapshot): string | undefined {
+  if (snap.isCurrentWeek) return undefined;
+  return snap.isFutureWeek
+    ? `Week ${snap.scoringPeriodId} is in the future: projections are ESPN's for that week; injury statuses shown are today's.`
+    : `Week ${snap.scoringPeriodId} is in the past: points are final; injury statuses shown are today's, not that week's.`;
 }
 
 function phaseOf(snap: Snapshot): string {
@@ -267,12 +299,12 @@ export function buildMcpServer(deps: ServerDeps): McpServer {
         const projectedTotal = (team: typeof me) =>
           Math.round(team.roster.filter((p) => p.slotId !== SLOT_BENCH && p.slotId !== SLOT_IR).reduce((s, p) => s + (p.projectedWeek ?? 0), 0) * 10) / 10;
         const pending = transactions.filter((t) => t.pending);
-        const standings = [...snap.teams].sort(
-          (a, b) => b.record.wins - a.record.wins || a.record.losses - b.record.losses || b.record.pointsFor - a.record.pointsFor,
-        );
+        const standings = rankTeams(snap);
         const myRank = standings.findIndex((t) => t.id === me.id) + 1;
         const kick = nextKickoffInfo(snap);
         const nowMs = snap.now.getTime();
+        const waiverNext = estimateNextWaiverRun(snap, tz);
+        const gameStatuses = snap.weekGames.map((g) => gameStatus(g, nowMs));
         return ok({
           now: formatDateTime(snap.now, tz),
           weekday: weekdayName(snap.now, tz),
@@ -291,9 +323,19 @@ export function buildMcpServer(deps: ServerDeps): McpServer {
             ir_slots: snap.settings.irSlots,
             lineup_lock: snap.settings.lineupLockType,
             position_limits: snap.settings.positionLimits,
-            waivers: snap.settings.waivers,
-            waiver_next_run: formatDateTime(snap.status.waiverNextExecutionDate, tz),
-            waiver_last_run: formatDateTime(snap.status.waiverLastExecutionDate, tz),
+            waivers: {
+              type: snap.settings.waivers.type,
+              uses_faab: snap.settings.waivers.usesFaab,
+              faab_budget: snap.settings.waivers.budget,
+              minimum_bid: snap.settings.waivers.minimumBid,
+              process_days: snap.settings.waivers.processDays,
+              waiver_period_hours: snap.settings.waivers.waiverPeriodHours,
+              acquisition_limit_per_season: snap.settings.waivers.acquisitionLimitPerSeason,
+              acquisition_limit_per_matchup: snap.settings.waivers.acquisitionLimitPerMatchup,
+              last_run: formatDateTime(snap.status.waiverLastExecutionDate, tz),
+              next_run: waiverNext.at,
+              next_run_is_estimate: waiverNext.estimated,
+            },
             trades: snap.settings.trades,
             regular_season_weeks: snap.settings.schedule.regularSeasonWeeks,
             playoff_teams: snap.settings.schedule.playoffTeams,
@@ -319,10 +361,13 @@ export function buildMcpServer(deps: ServerDeps): McpServer {
             ...kick,
             week_first_kickoff: snap.weekGames[0] ? formatDateTime(snap.weekGames[0].date, tz) : null,
             week_last_kickoff: snap.weekGames.length ? formatDateTime(snap.weekGames[snap.weekGames.length - 1]!.date, tz) : null,
-            week_games_remaining: snap.weekGames.filter((g) => g.date > nowMs).length,
+            week_games_not_started: gameStatuses.filter((s) => s === "scheduled").length,
+            week_games_in_progress: gameStatuses.filter((s) => s === "in_progress").length,
+            week_games_final: gameStatuses.filter((s) => s === "final").length,
           },
           pending_transactions: pending.map(compactTransaction),
           trades_awaiting_my_response: pending.filter((t) => t.awaitingMyResponse).length,
+          note: weekNote(snap),
           journal: {
             storage: journal.storageDescription,
             persistent: journal.persistent,
@@ -339,7 +384,7 @@ export function buildMcpServer(deps: ServerDeps): McpServer {
     {
       title: "My roster",
       description:
-        "Every player on my team with slot, lock status, injury status, this week's projection and opponent/kickoff, season points, ownership and positional rank. Use the ids here for lineup, drop and trade tools.",
+        "Every player on my team with slot, lock status, injury status, this week's projection and opponent/kickoff, season points, rest-of-season projection (ros_proj), ownership and positional rank. Use the ids here for lineup, drop and trade tools.",
       inputSchema: z.object({ week: weekField }),
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -349,6 +394,7 @@ export function buildMcpServer(deps: ServerDeps): McpServer {
         const cap = league.rosterCapacity(snap);
         return ok({
           week: snap.scoringPeriodId,
+          note: weekNote(snap),
           team: snap.myTeam.name,
           roster_capacity: cap,
           starters: snap.myTeam.roster.filter((p) => p.slotId !== SLOT_BENCH && p.slotId !== SLOT_IR).map(compactRosterPlayer),
@@ -371,6 +417,9 @@ export function buildMcpServer(deps: ServerDeps): McpServer {
     async ({ week }) =>
       guard(async () => {
         const snap = await league.getSnapshot(week);
+        if (!snap.isCurrentWeek && !snap.isFutureWeek) {
+          return fail(`Week ${snap.scoringPeriodId} is over; lineup recommendations only make sense for the current week (${snap.currentScoringPeriod}) or later.`);
+        }
         const plan = planLineup(league.lineupCandidates(snap), snap.settings.startingSlotCounts);
         return ok(renderPlan(snap, plan));
       }),
@@ -424,6 +473,9 @@ export function buildMcpServer(deps: ServerDeps): McpServer {
     async ({ week, dry_run }) =>
       guard(async () => {
         const snap = await league.getSnapshot(week);
+        if (!snap.isCurrentWeek && !snap.isFutureWeek) {
+          return fail(`Week ${snap.scoringPeriodId} is over; nothing to apply.`);
+        }
         const plan = planLineup(league.lineupCandidates(snap), snap.settings.startingSlotCounts);
         if (plan.moves.length === 0) {
           return ok({ submitted: null, unchanged: true, projected_total: plan.projectedTotal, warnings: plan.warnings, lineup: renderPlan(snap, plan).starters });
@@ -462,13 +514,30 @@ export function buildMcpServer(deps: ServerDeps): McpServer {
           bench: team.roster.filter((p) => p.slotId === SLOT_BENCH).map(compactRosterPlayer),
           projected: Math.round(team.roster.filter((p) => p.slotId !== SLOT_BENCH && p.slotId !== SLOT_IR).reduce((s, p) => s + (p.projectedWeek ?? 0), 0) * 10) / 10,
         });
+        const myPoints = matchup.home.teamId === me.id ? matchup.home.points : matchup.away?.points ?? 0;
+        const oppPoints = matchup.home.teamId === me.id ? matchup.away?.points ?? 0 : matchup.home.points;
+        const result =
+          matchup.winner === "UNDECIDED"
+            ? period === snap.currentMatchupPeriod
+              ? "in_progress"
+              : period > snap.currentMatchupPeriod
+                ? "upcoming"
+                : "undecided"
+            : matchup.winner === "TIE"
+              ? "tie"
+              : (matchup.winner === "HOME") === (matchup.home.teamId === me.id)
+                ? "won"
+                : "lost";
         return ok({
           week: snap.scoringPeriodId,
           matchup_period: period,
+          note: weekNote(snap),
           playoff_tier: matchup.playoffTier,
-          winner: matchup.winner,
-          me: { ...compactTeam(me), points: matchup.home.teamId === me.id ? matchup.home.points : matchup.away?.points, ...lineup(me) },
-          opponent: opp ? { ...compactTeam(opp), points: matchup.home.teamId === opp.id ? matchup.home.points : matchup.away?.points, ...lineup(opp) } : null,
+          result,
+          my_points: myPoints,
+          opponent_points: oppPoints,
+          me: { ...compactTeam(me), points: myPoints, ...lineup(me) },
+          opponent: opp ? { ...compactTeam(opp), points: oppPoints, ...lineup(opp) } : null,
         });
       }),
   );
@@ -484,9 +553,7 @@ export function buildMcpServer(deps: ServerDeps): McpServer {
     async () =>
       guard(async () => {
         const snap = await league.getSnapshot();
-        const standings = [...snap.teams].sort(
-          (a, b) => b.record.wins - a.record.wins || a.record.losses - b.record.losses || b.record.pointsFor - a.record.pointsFor,
-        );
+        const standings = rankTeams(snap);
         const mySchedule = snap.schedule
           .filter((m) => m.involvesMe)
           .map((m) => {
@@ -537,11 +604,14 @@ export function buildMcpServer(deps: ServerDeps): McpServer {
     {
       title: "Free agents and waiver players",
       description:
-        "Available players (free agents and, by default, players currently on waivers) with projections, ownership and this week's game. Filter by position and sort by projected points for the week, projected season total, season points, ownership or ownership change. 'availability' tells you whether a player can be added instantly (FREEAGENT) or needs a waiver claim (WAIVERS).",
+        "Available players (free agents and, by default, players currently on waivers) with projections, ownership and this week's game. Filter by position and sort by projected points for the week, rest-of-season projection (ros_proj), season points, ownership or ownership change. 'availability' tells you whether a player can be added instantly (FREEAGENT) or needs a waiver claim (WAIVERS).",
       inputSchema: z.object({
         positions: z.array(z.string()).optional().describe("Any of QB, RB, WR, TE, K, D/ST. Default: all."),
         limit: z.number().int().min(1).max(60).optional().describe("Default 25."),
-        sort: z.enum(["percent_owned", "projected_week", "projected_season", "season_points", "percent_change"]).optional(),
+        sort: z
+          .enum(["percent_owned", "projected_week", "projected_ros", "projected_season", "season_points", "percent_change"])
+          .optional()
+          .describe("projected_ros = ESPN rest-of-season projection (projected_season is an alias)."),
         include_waivers: z.boolean().optional().describe("Default true."),
         min_percent_owned: z.number().min(0).max(100).optional(),
         week: weekField,
@@ -553,7 +623,7 @@ export function buildMcpServer(deps: ServerDeps): McpServer {
         const res = await league.getFreeAgents({
           positions: args.positions,
           limit: args.limit,
-          sort: args.sort,
+          sort: args.sort === "projected_ros" ? "projected_season" : args.sort,
           includeWaivers: args.include_waivers,
           minPercentOwned: args.min_percent_owned,
           week: args.week,
@@ -588,8 +658,11 @@ export function buildMcpServer(deps: ServerDeps): McpServer {
     async ({ player_ids, week }) =>
       guard(async () => {
         const players = await league.getPlayers(player_ids, week);
+        const found = new Set(players.map((p) => p.id));
+        const notFound = player_ids.filter((id) => !found.has(id));
         return ok({
           players: players.map((p) => ({ ...compactPlayer(p), weekly_points: p.weeklyPoints, last_season_pts: p.lastSeasonPoints, droppable: p.droppable, news_updated: p.newsUpdated })),
+          not_found: notFound,
         });
       }),
   );
@@ -601,7 +674,7 @@ export function buildMcpServer(deps: ServerDeps): McpServer {
     {
       title: "Pending and recent transactions",
       description:
-        "Waiver claims, adds/drops and trades for the current and next scoring period across the league, with status. Includes my pending waiver claims and any trade proposals waiting for my response (awaiting_my_response=true). Use the ids with cancel_pending_transaction / respond_to_trade.",
+        "Waiver claims, adds, drops and trades for the current and next scoring period across the league, newest first, with status and a plain-language note. Includes my pending waiver claims and any trade proposals waiting for my response (awaiting_my_response=true). Pure lineup moves are hidden unless include_lineup_moves=true. Use the ids with cancel_pending_transaction / respond_to_trade.",
       inputSchema: z.object({
         only_mine: z.boolean().optional().describe("Only transactions involving my team."),
         only_pending: z.boolean().optional(),
@@ -657,7 +730,7 @@ export function buildMcpServer(deps: ServerDeps): McpServer {
             kickoff: formatDateTime(g.date, tz),
             away: proTeams.get(g.awayProTeamId)?.abbrev ?? g.awayProTeamId,
             home: proTeams.get(g.homeProTeamId)?.abbrev ?? g.homeProTeamId,
-            started: g.date <= snap.now.getTime(),
+            status: gameStatus(g, snap.now.getTime()),
           })),
           teams_on_bye: byes,
         });
@@ -909,6 +982,17 @@ function renderPlan(snap: Snapshot, plan: LineupPlan) {
     moves_for_set_lineup: plan.moves.map((m) => ({ player_id: m.playerId, to_slot: slotName(m.toSlot) })),
     warnings: plan.warnings,
   };
+}
+
+/** ESPN's playoff seed is the official standing (it applies the league's tiebreakers); fall back to record. */
+function rankTeams(snap: Snapshot) {
+  const seeds = snap.teams.map((t) => t.playoffSeed);
+  const seedsUsable = seeds.every((s) => typeof s === "number" && s > 0) && new Set(seeds).size === seeds.length;
+  return [...snap.teams].sort((a, b) =>
+    seedsUsable
+      ? a.playoffSeed! - b.playoffSeed!
+      : b.record.wins - a.record.wins || a.record.losses - b.record.losses || b.record.pointsFor - a.record.pointsFor,
+  );
 }
 
 function matchupPeriodForWeek(snap: Snapshot, week: number): number {

@@ -45,21 +45,33 @@ const PRO_TEAM_ABBREV: Record<number, string> = {
   18: "NO", 19: "NYG", 20: "NYJ", 21: "PHI", 23: "PIT", 24: "LAC", 25: "SF", 26: "SEA", 27: "TB", 29: "CAR", 33: "BAL", 34: "HOU",
 };
 
+/** Next week's games: every fixture team plays, paired in id order, a week later. */
+const WEEK8_IDS = Object.keys(PRO_TEAM_ABBREV).map(Number);
+const NEXT_WEEK_GAMES: { id: number; date: number; home: number; away: number }[] = [];
+for (let i = 0; i + 1 < WEEK8_IDS.length; i += 2) {
+  NEXT_WEEK_GAMES.push({ id: 8000 + i, date: SUN_EARLY + 7 * 86_400_000, home: WEEK8_IDS[i]!, away: WEEK8_IDS[i + 1]! });
+}
+
 export function proScheduleFixture(): RawProSchedule {
+  const toGame = (g: { id: number; date: number; home: number; away: number }, week: number) => ({
+    id: g.id,
+    date: g.date,
+    homeProTeamId: g.home,
+    awayProTeamId: g.away,
+    scoringPeriodId: week,
+    startTimeTBD: false,
+    statsOfficial: false,
+    validForLocking: true,
+  });
   const proTeams = Object.entries(PRO_TEAM_ABBREV).map(([idStr, abbrev]) => {
     const id = Number(idStr);
-    const games = GAMES.filter((g) => g.home === id || g.away === id).map((g) => ({
-      id: g.id,
-      date: g.date,
-      homeProTeamId: g.home,
-      awayProTeamId: g.away,
-      scoringPeriodId: WEEK,
-      startTimeTBD: false,
-      statsOfficial: false,
-      validForLocking: true,
-    }));
+    const games = GAMES.filter((g) => g.home === id || g.away === id).map((g) => toGame(g, WEEK));
+    const next = NEXT_WEEK_GAMES.filter((g) => g.home === id || g.away === id).map((g) => toGame(g, WEEK + 1));
     const byeWeek = games.length === 0 ? WEEK : 11;
-    return { id, abbrev, location: abbrev, name: abbrev, byeWeek, proGamesByScoringPeriod: games.length ? { [String(WEEK)]: games } : {} };
+    const proGamesByScoringPeriod: Record<string, ReturnType<typeof toGame>[]> = {};
+    if (games.length) proGamesByScoringPeriod[String(WEEK)] = games;
+    if (next.length) proGamesByScoringPeriod[String(WEEK + 1)] = next;
+    return { id, abbrev, location: abbrev, name: abbrev, byeWeek, proGamesByScoringPeriod };
   });
   return { settings: { proTeams } };
 }
@@ -76,6 +88,8 @@ export interface FixturePlayer {
   pctOwned?: number;
   droppable?: boolean;
   weekly?: Record<number, number>;
+  /** Points already scored this week (for live-score tests). */
+  actualWeek?: number;
 }
 
 const QB_SLOTS = [0, 7, 20, 21];
@@ -92,7 +106,7 @@ export const MY_PLAYERS: (FixturePlayer & { slot: number })[] = [
   { id: 104, name: "Delta Deep", posId: 3, proTeamId: 16, eligible: WR_SLOTS, proj: 13.1, season: 77.7, slot: 4, pctOwned: 97 },
   { id: 105, name: "Echo End", posId: 3, proTeamId: 2, eligible: WR_SLOTS, proj: 0, season: 70.2, slot: 4, pctOwned: 95 }, // BUF on bye
   { id: 106, name: "Foxtrot Tight", posId: 4, proTeamId: 25, eligible: TE_SLOTS, proj: 8.7, season: 48.0, slot: 6, pctOwned: 88 },
-  { id: 107, name: "Golf Gadget", posId: 3, proTeamId: 21, eligible: WR_SLOTS, proj: 9.9, season: 55.3, slot: 23, pctOwned: 80 }, // TNF
+  { id: 107, name: "Golf Gadget", posId: 3, proTeamId: 21, eligible: WR_SLOTS, proj: 9.9, season: 55.3, slot: 23, pctOwned: 80, actualWeek: 14.5 }, // TNF
   { id: 108, name: "Hotel Defense", posId: 16, proTeamId: 33, eligible: DST_SLOTS, proj: 7.0, season: 51.0, slot: 16, pctOwned: 85 },
   { id: 109, name: "India Kicker", posId: 5, proTeamId: 6, eligible: K_SLOTS, proj: 8.0, season: 52.0, slot: 17, pctOwned: 70 },
   { id: 110, name: "Juliet Jet", posId: 2, proTeamId: 23, eligible: RB_SLOTS, proj: 12.8, season: 58.9, slot: 20, pctOwned: 76 },
@@ -112,7 +126,7 @@ export const OPP_PLAYERS: (FixturePlayer & { slot: number })[] = [
   { id: 504, name: "Wes Wideout", posId: 3, proTeamId: 26, eligible: WR_SLOTS, proj: 12.0, season: 75.0, slot: 4, pctOwned: 94 },
   { id: 505, name: "Vic Vertical", posId: 3, proTeamId: 3, eligible: WR_SLOTS, proj: 10.0, season: 60.0, slot: 4, pctOwned: 80 },
   { id: 506, name: "Ted Tightend", posId: 4, proTeamId: 20, eligible: TE_SLOTS, proj: 7.0, season: 40.0, slot: 6, pctOwned: 70 },
-  { id: 507, name: "Flo Flex", posId: 3, proTeamId: 19, eligible: WR_SLOTS, proj: 8.0, season: 45.0, slot: 23, pctOwned: 50 },
+  { id: 507, name: "Flo Flex", posId: 3, proTeamId: 19, eligible: WR_SLOTS, proj: 8.0, season: 45.0, slot: 23, pctOwned: 50, actualWeek: 6.0 },
   { id: 508, name: "Dee Fence", posId: 16, proTeamId: 26, eligible: DST_SLOTS, proj: 6.0, season: 45.0, slot: 16, pctOwned: 60 },
   { id: 509, name: "Kay Kicker", posId: 5, proTeamId: 12, eligible: K_SLOTS, proj: 8.5, season: 55.0, slot: 17, pctOwned: 65 },
   { id: 510, name: "Ben Bench", posId: 2, proTeamId: 10, eligible: RB_SLOTS, proj: 5.0, season: 30.0, slot: 20, pctOwned: 30 },
@@ -125,6 +139,7 @@ export const FREE_AGENTS: (FixturePlayer & { status: "FREEAGENT" | "WAIVERS" })[
   { id: 204, name: "Uniform Util", posId: 4, proTeamId: 3, eligible: TE_SLOTS, proj: 4.0, season: 15.0, pctOwned: 5, status: "FREEAGENT" },
   { id: 205, name: "Victor Vet", posId: 1, proTeamId: 4, eligible: QB_SLOTS, proj: 17.0, season: 95.0, pctOwned: 48, status: "FREEAGENT" },
   { id: 206, name: "Whiskey Wing", posId: 3, proTeamId: 20, eligible: WR_SLOTS, proj: 6.0, season: 25.0, pctOwned: 12, status: "FREEAGENT" },
+  { id: -16006, name: "Cowboys D/ST", posId: 16, proTeamId: 6, eligible: DST_SLOTS, proj: 5.5, season: 30.0, pctOwned: 25, status: "FREEAGENT" },
 ];
 
 export const OTHER_LEAGUE_PLAYERS: FixturePlayer[] = [
@@ -144,6 +159,11 @@ function stats(p: FixturePlayer): RawStat[] {
   for (const [week, pts] of Object.entries(p.weekly ?? {})) {
     out.push({ seasonId: SEASON, scoringPeriodId: Number(week), statSourceId: 0, statSplitTypeId: 1, appliedTotal: pts, stats: {} });
   }
+  if (p.actualWeek !== undefined) {
+    out.push({ seasonId: SEASON, scoringPeriodId: WEEK, statSourceId: 0, statSplitTypeId: 1, appliedTotal: p.actualWeek, stats: {} });
+  }
+  // Next week's projection: slightly lower, and bye-week players get their normal number back.
+  out.push({ seasonId: SEASON, scoringPeriodId: WEEK + 1, statSourceId: 1, statSplitTypeId: 1, appliedTotal: Math.round((p.proj || p.season / 6) * 0.9 * 10) / 10, stats: {} });
   return out;
 }
 
@@ -163,7 +183,7 @@ export function playerPoolEntry(p: FixturePlayer, onTeamId: number, status: stri
       defaultPositionId: p.posId,
       proTeamId: p.proTeamId,
       eligibleSlots: p.eligible,
-      injuryStatus: p.injuryStatus ?? "ACTIVE",
+      injuryStatus: p.posId === 16 ? undefined : p.injuryStatus ?? "ACTIVE",
       injured: !!p.injuryStatus && p.injuryStatus !== "ACTIVE",
       active: true,
       droppable: p.droppable ?? true,
@@ -198,6 +218,7 @@ const TEAM_META: { id: number; abbrev: string; name: string; owner: string; wins
 ];
 
 export function leagueFixture(overrides: Partial<RawLeague> = {}): RawLeague {
+  const seedOrder = [...TEAM_META].sort((a, b) => b.wins - a.wins || b.pf - a.pf).map((t) => t.id);
   const teams = TEAM_META.map((t) => {
     let entries: RawRosterEntry[] = [];
     if (t.id === MY_TEAM_ID) entries = MY_PLAYERS.map((p) => rosterEntry(p, t.id));
@@ -209,7 +230,7 @@ export function leagueFixture(overrides: Partial<RawLeague> = {}): RawLeague {
       name: t.name,
       owners: [t.owner],
       primaryOwner: t.owner,
-      playoffSeed: TEAM_META.indexOf(t) + 1,
+      playoffSeed: seedOrder.indexOf(t.id) + 1,
       waiverRank: t.waiverRank,
       record: { overall: { wins: t.wins, losses: t.losses, ties: 0, pointsFor: t.pf, pointsAgainst: t.pa, streakLength: 1, streakType: "WIN" } },
       roster: { entries },
@@ -296,6 +317,31 @@ export function leagueFixture(overrides: Partial<RawLeague> = {}): RawLeague {
 export function transactionsFixture(): RawTransaction[] {
   return [
     {
+      id: "tx-drop-1",
+      type: "ROSTER",
+      status: "EXECUTED",
+      teamId: 8,
+      memberId: "{OWNER-8}",
+      scoringPeriodId: WEEK,
+      proposedDate: Date.parse("2026-10-15T12:00:00Z"),
+      isPending: false,
+      items: [{ playerId: -16006, type: "DROP", fromTeamId: 8, toLineupSlotId: -1 }],
+    },
+    {
+      id: "tx-lineup-1",
+      type: "ROSTER",
+      status: "EXECUTED",
+      teamId: MY_TEAM_ID,
+      memberId: MY_SWID,
+      scoringPeriodId: WEEK,
+      proposedDate: Date.parse("2026-10-14T18:00:00Z"),
+      isPending: false,
+      items: [
+        { playerId: 110, type: "LINEUP", fromLineupSlotId: 20, toLineupSlotId: 2 },
+        { playerId: 103, type: "LINEUP", fromLineupSlotId: 2, toLineupSlotId: 20 },
+      ],
+    },
+    {
       id: "tx-waiver-1",
       type: "WAIVER",
       status: "PENDING",
@@ -354,6 +400,7 @@ export function activityFixture() {
         messages: [
           { id: "m1", messageTypeId: 178, targetId: 300, to: 7, for: 7, date: Date.parse("2026-10-14T15:00:00Z") },
           { id: "m2", messageTypeId: 179, targetId: 301, from: 7, for: 7, date: Date.parse("2026-10-14T15:00:00Z") },
+          { id: "m3", messageTypeId: 179, targetId: -16006, from: 8, for: 8, date: Date.parse("2026-10-15T12:00:00Z") },
         ],
       },
     ],

@@ -157,6 +157,10 @@ export interface Snapshot {
   leagueName: string;
   now: Date;
   scoringPeriodId: number;
+  /** The league's live scoring period (this week), regardless of the week requested. */
+  currentScoringPeriod: number;
+  isCurrentWeek: boolean;
+  isFutureWeek: boolean;
   currentMatchupPeriod: number;
   latestScoringPeriod: number;
   firstScoringPeriod: number;
@@ -181,10 +185,13 @@ export interface TransactionInfo {
   isMine: boolean;
   bidAmount: number | null;
   proposed: string | null;
+  proposedMs: number | null;
   processed: string | null;
   expires: string | null;
   scoringPeriodId: number | null;
   pending: boolean;
+  /** Plain-language explanation of what this record means right now. */
+  note: string | null;
   items: { action: string; playerId: number; player: string; fromTeam: string | null; toTeam: string | null; fromSlot: string | null; toSlot: string | null }[];
   relatedTransactionId: string | null;
   /** For trades: whether this proposal is addressed to my team (I must accept/decline). */
@@ -302,7 +309,10 @@ export class LeagueService {
     ]);
     const now = this.now;
     const status = league.status ?? {};
-    const scoringPeriodId = week ?? league.scoringPeriodId ?? status.latestScoringPeriod ?? 1;
+    const currentScoringPeriod = league.scoringPeriodId ?? status.latestScoringPeriod ?? 1;
+    const scoringPeriodId = week ?? currentScoringPeriod;
+    const isCurrentWeek = scoringPeriodId === currentScoringPeriod;
+    const isFutureWeek = scoringPeriodId > currentScoringPeriod;
     const settings = summariseSettings(league.settings ?? {}, this.timezone, now);
     const members = new Map((league.members ?? []).map((m) => [m.id.toUpperCase(), m]));
     const weekGames = this.gamesForWeek(proTeams, scoringPeriodId);
@@ -315,6 +325,9 @@ export class LeagueService {
       const summary = summariseTeam(t, members, settings, t.id === myRawTeam.id);
       const roster = (t.roster?.entries ?? []).map((entry) => {
         const rp = this.normaliseRosterEntry(entry, scoringPeriodId, proTeams, settings, now, weekGames);
+        rp.availability = "ONTEAM";
+        rp.onTeamId = t.id;
+        rp.onTeamName = summary.name;
         playerNames.set(rp.id, rp.name);
         return rp;
       });
@@ -324,7 +337,19 @@ export class LeagueService {
     const teamName = (id: number) => teams.find((t) => t.id === id)?.name ?? `Team ${id}`;
     const myTeam = teams.find((t) => t.id === myRawTeam.id)!;
 
-    const schedule: MatchupInfo[] = (league.schedule ?? []).map((m) => summariseMatchup(m, teamName, myTeam.id));
+    // Points scored so far this week, from the rostered starters' actuals. ESPN only
+    // fills schedule[].totalPoints once a matchup period is over.
+    const liveByTeam = new Map<number, number>();
+    for (const team of teams) {
+      liveByTeam.set(
+        team.id,
+        round1(team.roster.filter((p) => p.slotId !== SLOT_BENCH && p.slotId !== SLOT_IR).reduce((sum, p) => sum + (p.actualWeek ?? 0), 0)),
+      );
+    }
+    const currentMatchupPeriod = status.currentMatchupPeriod ?? 1;
+    const schedule: MatchupInfo[] = (league.schedule ?? []).map((m) =>
+      summariseMatchup(m, teamName, myTeam.id, { currentMatchupPeriod, liveByTeam: isCurrentWeek ? liveByTeam : undefined }),
+    );
 
     return {
       season: league.seasonId ?? this.season,
@@ -332,7 +357,10 @@ export class LeagueService {
       leagueName: settings.name,
       now,
       scoringPeriodId,
-      currentMatchupPeriod: status.currentMatchupPeriod ?? 1,
+      currentScoringPeriod,
+      isCurrentWeek,
+      isFutureWeek,
+      currentMatchupPeriod,
       latestScoringPeriod: status.latestScoringPeriod ?? scoringPeriodId,
       firstScoringPeriod: status.firstScoringPeriod ?? 1,
       finalScoringPeriod: status.finalScoringPeriod ?? 18,
@@ -378,7 +406,7 @@ export class LeagueService {
     const ppe = entry.playerPoolEntry;
     const player: RawPlayer = ppe?.player ?? { id: entry.playerId };
     const info = this.normalisePlayer(player, ppe, week, proTeams, now, settings, weekGames);
-    if (entry.injuryStatus && !player.injuryStatus) info.injuryStatus = entry.injuryStatus;
+    if (entry.injuryStatus && !player.injuryStatus) info.injuryStatus = normaliseInjuryStatus(entry.injuryStatus);
     const locked = computeLocked(info.game, ppe?.lineupLocked, settings.lineupLockType, weekGames, now);
     return {
       ...info,
@@ -419,7 +447,7 @@ export class LeagueService {
       name: player.fullName || [player.firstName, player.lastName].filter(Boolean).join(" ") || `Player ${player.id}`,
       position: positionName(player.defaultPositionId),
       proTeam: proTeamAbbrev(proTeamId),
-      injuryStatus: player.injuryStatus ?? "ACTIVE",
+      injuryStatus: normaliseInjuryStatus(player.injuryStatus),
       injured: player.injured ?? false,
       eligibleSlots: eligibleSlotIds.map(slotName),
       eligibleSlotIds,
@@ -532,21 +560,26 @@ export class LeagueService {
     const scored = (Array.isArray(universe) ? universe : [])
       .map((p) => {
         const name = normaliseName(p.fullName ?? "");
+        const nameTokens = name.split(" ");
         let score = 0;
         if (name === q) score = 100;
+        else if (nameTokens.includes(q)) score = 90; // whole word, e.g. "rice" -> Rashee Rice
         else if (name.startsWith(q)) score = 80;
-        else if (name.includes(q)) score = 60;
+        else if (nameTokens.some((t) => t.startsWith(q))) score = 70;
+        else if (tokens.every((t) => nameTokens.includes(t))) score = 65;
+        else if (name.includes(q)) score = 50;
         else if (tokens.every((t) => name.includes(t))) score = 40;
         else if (tokens.some((t) => t.length >= 4 && name.includes(t))) score = 10;
         return { p, score };
       })
       .filter((x) => x.score > 0)
       .sort((a, b) => b.score - a.score || (a.p.fullName ?? "").localeCompare(b.p.fullName ?? ""))
-      .slice(0, limit);
+      .slice(0, Math.min(40, Math.max(10, limit * 3)));
     if (scored.length === 0) return [];
+    // ESPN only returns players in the league's universe, so fetch more candidates than needed.
     const details = await this.getPlayers(scored.map((x) => x.p.id), week);
     const order = new Map(scored.map((x, i) => [x.p.id, i]));
-    return details.sort((a, b) => (order.get(a.id) ?? 99) - (order.get(b.id) ?? 99));
+    return details.sort((a, b) => (order.get(a.id) ?? 99) - (order.get(b.id) ?? 99)).slice(0, limit);
   }
 
   // ---- Transactions ---------------------------------------------------------------
@@ -554,7 +587,9 @@ export class LeagueService {
   async getTransactions(opts: { week?: number; types?: string[]; includeLineupMoves?: boolean } = {}): Promise<TransactionInfo[]> {
     const snap = await this.getSnapshot(opts.week);
     const week = snap.scoringPeriodId;
-    const types = opts.types ?? TRANSACTION_TYPES.filter((t) => opts.includeLineupMoves || (t !== "ROSTER" && t !== "FUTURE_ROSTER" && t !== "RETRO_ROSTER"));
+    // ROSTER covers both lineup moves and standalone drops, so always request it and
+    // filter pure lineup transactions afterwards.
+    const types = opts.types ?? [...TRANSACTION_TYPES];
     const filter = { transactions: { filterType: { value: types } } };
     const periods = [week];
     if (week < snap.finalScoringPeriod) periods.push(week + 1);
@@ -579,10 +614,13 @@ export class LeagueService {
       for (const t of [...(r.transactions ?? []), ...(r.pendingTransactions ?? [])]) {
         if (seen.has(t.id)) continue;
         seen.add(t.id);
+        const items = t.items ?? [];
+        const lineupOnly = (t.type === "ROSTER" || t.type === "FUTURE_ROSTER" || t.type === "RETRO_ROSTER") && (items.length === 0 || items.every((i) => i.type === "LINEUP"));
+        if (lineupOnly && !opts.includeLineupMoves) continue;
         out.push(this.summariseTransaction(t, snap, names));
       }
     }
-    out.sort((a, b) => (b.proposed ?? "").localeCompare(a.proposed ?? ""));
+    out.sort((a, b) => (b.proposedMs ?? 0) - (a.proposedMs ?? 0));
     return out;
   }
 
@@ -603,31 +641,54 @@ export class LeagueService {
   private summariseTransaction(t: RawTransaction, snap: Snapshot, names: Map<number, string>): TransactionInfo {
     const teamName = (id: number | undefined) => (id === undefined || id === 0 ? null : snap.teams.find((x) => x.id === id)?.name ?? `Team ${id}`);
     const myId = snap.myTeam.id;
+    const slot = (id: number | undefined) => (id !== undefined && id >= 0 ? slotName(id) : null);
     const items = (t.items ?? []).map((i) => ({
       action: i.type,
       playerId: i.playerId,
       player: names.get(i.playerId) ?? `Player ${i.playerId}`,
       fromTeam: teamName(i.fromTeamId),
       toTeam: teamName(i.toTeamId),
-      fromSlot: i.fromLineupSlotId !== undefined ? slotName(i.fromLineupSlotId) : null,
-      toSlot: i.toLineupSlotId !== undefined ? slotName(i.toLineupSlotId) : null,
+      fromSlot: slot(i.fromLineupSlotId),
+      toSlot: slot(i.toLineupSlotId),
     }));
     const pending = t.status === "PENDING" || t.isPending === true;
+    const isMine = t.teamId === myId;
     const awaitingMyResponse =
-      t.type === "TRADE_PROPOSAL" && pending && t.teamId !== myId && (t.items ?? []).some((i) => i.toTeamId === myId || i.fromTeamId === myId);
+      t.type === "TRADE_PROPOSAL" && pending && !isMine && (t.items ?? []).some((i) => i.toTeamId === myId || i.fromTeamId === myId);
+    const processed = formatDateTime(t.processDate, this.timezone);
+    const expires = formatDateTime(t.expirationDate, this.timezone);
+    const nowMs = this.now.getTime();
+    const otherTeam = (t.items ?? []).map((i) => (i.fromTeamId === t.teamId ? i.toTeamId : i.fromTeamId)).find((id) => id !== undefined && id !== t.teamId);
+    let note: string | null = null;
+    if (t.type === "TRADE_PROPOSAL" && pending) {
+      if (awaitingMyResponse) note = `Trade proposed to my team; respond before ${expires ?? "it expires"}.`;
+      else if (isMine) note = `My proposal; waiting for ${teamName(otherTeam) ?? "the other team"} to respond${expires ? ` (expires ${expires})` : ""}.`;
+      else note = "Proposal between other teams.";
+    } else if (t.type === "TRADE_ACCEPT" && pending) {
+      note = t.processDate && t.processDate > nowMs ? `Trade accepted; in league review until ${processed}.` : "Trade accepted; waiting for ESPN to process it.";
+    } else if (t.type === "WAIVER" && pending) {
+      note = "Waiver claim pending; it is decided at the next waiver run.";
+    } else if (t.type === "WAIVER_ERROR") {
+      note = "Waiver claim failed (outbid, lower priority, or roster problem).";
+    } else if (!t.status) {
+      note = "ESPN returned no status for this record.";
+    }
+    if (items.length === 0 && t.type.startsWith("TRADE")) note = `${note ? `${note} ` : ""}ESPN returned no player details for this record.`;
     return {
       id: t.id,
       type: t.type,
       status: t.status ?? (pending ? "PENDING" : "UNKNOWN"),
       teamId: t.teamId ?? null,
       team: teamName(t.teamId),
-      isMine: t.teamId === myId,
+      isMine,
       bidAmount: t.bidAmount ?? null,
       proposed: formatDateTime(t.proposedDate, this.timezone),
-      processed: formatDateTime(t.processDate, this.timezone),
-      expires: formatDateTime(t.expirationDate, this.timezone),
+      proposedMs: t.proposedDate ?? null,
+      processed,
+      expires,
       scoringPeriodId: t.scoringPeriodId ?? null,
       pending,
+      note,
       items,
       relatedTransactionId: t.relatedTransactionId ?? null,
       awaitingMyResponse,
@@ -656,7 +717,11 @@ export class LeagueService {
       throw err;
     }
     const messages = (feed.topics ?? []).flatMap((topic) => (topic.messages ?? []).map((m) => ({ topic, m })));
-    const names = await this.resolveNames(snap, messages.map(({ m }) => m.targetId ?? -1).filter((id) => id > 0), snap.scoringPeriodId);
+    const names = await this.resolveNames(
+      snap,
+      messages.map(({ m }) => m.targetId).filter((id): id is number => id !== undefined && id !== 0),
+      snap.scoringPeriodId,
+    );
     const teamName = (id: number | undefined) => (id === undefined || id === 0 ? null : snap.teams.find((x) => x.id === id)?.name ?? `Team ${id}`);
     const out: ActivityItem[] = [];
     for (const { topic, m } of messages) {
@@ -680,7 +745,13 @@ export class LeagueService {
     return { teamId: snap.myTeam.id, memberId: this.swid, scoringPeriodId: week ?? snap.latestScoringPeriod ?? snap.scoringPeriodId };
   }
 
+  /**
+   * Roster as optimiser input. Injury designations describe today, so for a
+   * future week they are ignored (ESPN's projection for that week already
+   * reflects whether the player is expected back) and nothing is locked.
+   */
   lineupCandidates(snap: Snapshot): LineupCandidate[] {
+    const future = snap.isFutureWeek;
     return snap.myTeam.roster.map((p) => ({
       playerId: p.id,
       name: p.name,
@@ -688,9 +759,9 @@ export class LeagueService {
       eligibleSlots: p.eligibleSlotIds,
       currentSlot: p.slotId,
       projected: p.projectedWeek ?? 0,
-      injuryStatus: p.injuryStatus,
+      injuryStatus: future && p.injuryStatus !== "INJURY_RESERVE" ? "ACTIVE" : p.injuryStatus,
       onBye: p.game.bye,
-      locked: p.locked,
+      locked: future ? false : p.locked,
     }));
   }
 
@@ -811,9 +882,26 @@ function summariseTeam(t: RawTeam, members: Map<string, { displayName?: string; 
   };
 }
 
-function summariseMatchup(m: RawScheduleItem, teamName: (id: number) => string, myTeamId: number): MatchupInfo {
-  const side = (s: RawScheduleItem["home"]) =>
-    s ? { teamId: s.teamId, team: teamName(s.teamId), points: round1(s.totalPoints ?? 0), projectedLive: numOrNull(s.totalProjectedPointsLive, 1) } : null;
+function summariseMatchup(
+  m: RawScheduleItem,
+  teamName: (id: number) => string,
+  myTeamId: number,
+  ctx: { currentMatchupPeriod: number; liveByTeam?: Map<number, number> },
+): MatchupInfo {
+  const side = (s: RawScheduleItem["home"]) => {
+    if (!s) return null;
+    let points = round1(s.totalPoints ?? 0);
+    if (m.matchupPeriodId === ctx.currentMatchupPeriod && points === 0) {
+      const candidates = [
+        s.totalPointsLive,
+        s.pointsByScoringPeriod ? Object.values(s.pointsByScoringPeriod).reduce((a, b) => a + b, 0) : undefined,
+        ctx.liveByTeam?.get(s.teamId),
+      ];
+      const live = candidates.find((c): c is number => typeof c === "number" && c > 0);
+      if (live !== undefined) points = round1(live);
+    }
+    return { teamId: s.teamId, team: teamName(s.teamId), points, projectedLive: numOrNull(s.totalProjectedPointsLive, 1) };
+  };
   const home = side(m.home) ?? { teamId: 0, team: "BYE", points: 0, projectedLive: null };
   const away = side(m.away);
   return {
@@ -918,6 +1006,7 @@ function computeLocked(game: GameInfo, lineupLocked: boolean | undefined, lockTy
 function resolveSlotFilter(positions: string[] | undefined): number[] {
   if (!positions || positions.length === 0) return [0, 2, 4, 6, 16, 17];
   const ids = new Set<number>();
+  const unknown: string[] = [];
   for (const p of positions) {
     const key = p.trim().toUpperCase();
     const mapped = POSITION_SLOT_FILTER[key] ?? POSITION_SLOT_FILTER[key.replace("DEF", "D/ST")];
@@ -926,9 +1015,17 @@ function resolveSlotFilter(positions: string[] | undefined): number[] {
     else {
       const slot = resolveSlot(key);
       if (slot !== undefined) ids.add(slot);
+      else unknown.push(p);
     }
   }
+  if (unknown.length) throw new LeagueError(`Unknown position(s): ${unknown.join(", ")}. Use QB, RB, WR, TE, K, D/ST or FLEX.`);
   return ids.size ? [...ids] : [0, 2, 4, 6, 16, 17];
+}
+
+/** ESPN uses NORMAL for healthy D/STs and ACTIVE for healthy players; present one value. */
+function normaliseInjuryStatus(status: string | undefined): string {
+  if (!status || status === "NORMAL") return "ACTIVE";
+  return status;
 }
 
 function normaliseName(s: string): string {

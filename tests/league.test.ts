@@ -131,7 +131,7 @@ describe("LeagueService snapshot", () => {
     await expect(badId.league.getSnapshot()).rejects.toThrow(/not a team in this league/);
   });
 
-  it("summarises the schedule with my matchup", async () => {
+  it("summarises the schedule with my matchup and live points for the current week", async () => {
     const { league } = service();
     const snap = await league.getSnapshot();
     const mine = snap.schedule.filter((m) => m.involvesMe);
@@ -139,6 +139,38 @@ describe("LeagueService snapshot", () => {
     const thisWeek = mine.find((m) => m.matchupPeriod === WEEK)!;
     expect([thisWeek.home.teamId, thisWeek.away?.teamId]).toContain(OPP_TEAM_ID);
     expect(thisWeek.winner).toBe("UNDECIDED");
+    // ESPN reports totalPoints 0 during the week; points come from the starters' actuals instead.
+    const mySide = thisWeek.home.teamId === MY_TEAM_ID ? thisWeek.home : thisWeek.away!;
+    const oppSide = thisWeek.home.teamId === MY_TEAM_ID ? thisWeek.away! : thisWeek.home;
+    expect(mySide.points).toBe(14.5);
+    expect(oppSide.points).toBe(6);
+    const lastWeek = mine.find((m) => m.matchupPeriod === WEEK - 1)!;
+    expect(lastWeek.home.points).toBeGreaterThan(90);
+  });
+
+  it("flags current vs future weeks and relaxes injury statuses for future weeks", async () => {
+    const { league } = service();
+    const now = await league.getSnapshot();
+    expect(now.isCurrentWeek).toBe(true);
+    expect(now.isFutureWeek).toBe(false);
+    const next = await league.getSnapshot(WEEK + 1);
+    expect(next.isCurrentWeek).toBe(false);
+    expect(next.isFutureWeek).toBe(true);
+    const charlieNow = league.lineupCandidates(now).find((c) => c.playerId === 103)!;
+    const charlieNext = league.lineupCandidates(next).find((c) => c.playerId === 103)!;
+    expect(charlieNow.injuryStatus).toBe("OUT");
+    expect(charlieNext.injuryStatus).toBe("ACTIVE");
+    expect(charlieNext.projected).toBe(9.9);
+    expect(next.myTeam.roster.find((p) => p.id === 105)!.game.bye).toBe(false);
+  });
+
+  it("presents D/ST health as ACTIVE and names the owning team on roster players", async () => {
+    const { league } = service();
+    const snap = await league.getSnapshot();
+    const dst = snap.myTeam.roster.find((p) => p.id === 108)!;
+    expect(dst.injuryStatus).toBe("ACTIVE");
+    expect(dst.onTeamName).toBe("Mile High Maulers");
+    expect(dst.availability).toBe("ONTEAM");
   });
 });
 
@@ -162,6 +194,10 @@ describe("LeagueService players", () => {
 
     const owned = await league.getFreeAgents({ minPercentOwned: 40 });
     expect(owned.players.map((p) => p.name).sort()).toEqual(["Romeo Rookie", "Sierra Streak", "Victor Vet"]);
+
+    const dst = await league.getFreeAgents({ positions: ["D/ST"] });
+    expect(dst.players.map((p) => p.name).sort()).toEqual(["Cowboys D/ST", "Tango Tackler"]);
+    await expect(league.getFreeAgents({ positions: ["XYZ"] })).rejects.toThrow(/Unknown position/);
   });
 
   it("fetches players by id with league availability", async () => {
@@ -179,32 +215,47 @@ describe("LeagueService players", () => {
     const romeo = await league.searchPlayers("romeo rook");
     expect(romeo[0]!.id).toBe(201);
     expect(await league.searchPlayers("zzzz")).toEqual([]);
+    // Whole-word matches outrank substring matches and a small limit still finds them.
+    const jet = await league.searchPlayers("jet", 1);
+    expect(jet.map((p) => p.name)).toEqual(["Juliet Jet"]);
+    const cowboys = await league.searchPlayers("cowboys");
+    expect(cowboys[0]!.id).toBe(-16006);
   });
 });
 
 describe("LeagueService transactions & activity", () => {
-  it("lists transactions with names, ownership and trade flags", async () => {
+  it("lists transactions newest first with names, drops, notes and trade flags", async () => {
     const { league } = service();
     const txs = await league.getTransactions();
-    expect(txs.map((t) => t.id).sort()).toEqual(["tx-fa-1", "tx-trade-1", "tx-waiver-1"]);
+    // Standalone drops are included; pure lineup moves are not.
+    expect(txs.map((t) => t.id)).toEqual(["tx-drop-1", "tx-trade-1", "tx-waiver-1", "tx-fa-1"]);
+    const drop = txs[0]!;
+    expect(drop.items[0]).toMatchObject({ action: "DROP", player: "Cowboys D/ST", toSlot: null });
     const waiver = txs.find((t) => t.id === "tx-waiver-1")!;
     expect(waiver).toMatchObject({ isMine: true, pending: true, bidAmount: 12, team: "Mile High Maulers" });
     expect(waiver.items.map((i) => i.player)).toEqual(["Sierra Streak", "Papa Punt"]);
+    expect(waiver.note).toMatch(/Waiver claim pending/);
     const trade = txs.find((t) => t.id === "tx-trade-1")!;
     expect(trade.awaitingMyResponse).toBe(true);
     expect(trade.isMine).toBe(false);
     expect(trade.expires).toMatch(/Oct 16, 2026/);
+    expect(trade.note).toMatch(/Trade proposed to my team; respond before/);
     const fa = txs.find((t) => t.id === "tx-fa-1")!;
     expect(fa.pending).toBe(false);
     expect(fa.items[0]!.player).toBe("Xray Xtra");
+    expect(fa.note).toBeNull();
+
+    const withLineups = await league.getTransactions({ includeLineupMoves: true });
+    expect(withLineups.map((t) => t.id)).toContain("tx-lineup-1");
   });
 
-  it("reads the activity feed", async () => {
+  it("reads the activity feed, resolving D/ST names", async () => {
     const { league } = service();
     const items = await league.getRecentActivity();
-    expect(items).toHaveLength(2);
+    expect(items).toHaveLength(3);
     expect(items[0]).toMatchObject({ action: "FA ADDED", player: "Xray Xtra", team: "Gator Gang" });
     expect(items[1]).toMatchObject({ action: "DROPPED", player: "Yankee Yard", team: "Gator Gang" });
+    expect(items[2]).toMatchObject({ action: "DROPPED", player: "Cowboys D/ST", team: "Hornet Hive" });
   });
 });
 

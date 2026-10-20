@@ -84,9 +84,15 @@ describe("MCP server end to end", () => {
     expect(data.this_week_matchup.opponent.id).toBe(OPP_TEAM_ID);
     expect(data.lineup_issues).toEqual(expect.arrayContaining([expect.stringMatching(/Echo End .* BYE/), expect.stringMatching(/Charlie Carrier .* OUT/)]));
     expect(data.locks.my_next_locking_player.name).toBe("Golf Gadget");
+    expect(data.locks).toMatchObject({ week_games_not_started: 12, week_games_in_progress: 0, week_games_final: 0 });
     expect(data.pending_transactions.map((x: any) => x.id).sort()).toEqual(["tx-trade-1", "tx-waiver-1"]);
     expect(data.trades_awaiting_my_response).toBe(1);
-    expect(data.league.waivers.usesFaab).toBe(true);
+    expect(data.league.waivers.uses_faab).toBe(true);
+    expect(data.league.waivers.next_run).toMatch(/Oct 21, 2026/);
+    expect(data.league.waivers.next_run_is_estimate).toBe(false);
+    expect(data.this_week_matchup.my_points_so_far).toBe(14.5);
+    expect(data.this_week_matchup.opponent_points_so_far).toBe(6);
+    expect(data.my_team.standing).toBe("4 of 10");
     await client.close();
   });
 
@@ -97,6 +103,13 @@ describe("MCP server end to end", () => {
     expect(rec.data.projected_total_recommended).toBe(103.7);
     expect(rec.data.moves).toHaveLength(4);
     expect(t.espn.writes).toHaveLength(0);
+
+    const past = await call(client, "get_lineup_recommendation", { week: 5 });
+    expect(past.isError).toBe(true);
+    const future = await call(client, "get_lineup_recommendation", { week: 8 });
+    expect(future.isError).toBe(false);
+    expect(future.data.starters.every((s: any) => s.locked === false)).toBe(true);
+    expect(JSON.stringify(future.data.warnings)).not.toMatch(/out/i);
 
     const dry = await call(client, "apply_recommended_lineup", { dry_run: true });
     expect(dry.data.dry_run).toBe(true);
@@ -223,15 +236,23 @@ describe("MCP server end to end", () => {
     const search = await call(client, "search_players", { query: "victor" });
     expect(search.data.players[0].id).toBe(205);
 
-    const player = await call(client, "get_player", { player_ids: [101] });
+    const player = await call(client, "get_player", { player_ids: [101, 999999] });
     expect(player.data.players[0].weekly_points).toEqual({ "5": 22.1, "6": 17.4 });
+    expect(player.data.players[0].ros_proj).toBeGreaterThan(0);
+    expect(player.data.not_found).toEqual([999999]);
+
+    const badPos = await call(client, "get_free_agents", { positions: ["XYZ"] });
+    expect(badPos.isError).toBe(true);
 
     const matchup = await call(client, "get_matchup");
     expect(matchup.data.opponent.id).toBe(OPP_TEAM_ID);
     expect(matchup.data.me.starters).toHaveLength(9);
+    expect(matchup.data).toMatchObject({ result: "in_progress", my_points: 14.5, opponent_points: 6 });
+    const lastWeek = await call(client, "get_matchup", { week: 5 });
+    expect(["won", "lost"]).toContain(lastWeek.data.result);
 
     const sched = await call(client, "get_nfl_schedule");
-    expect(sched.data.games[0]).toMatchObject({ away: "NYG", home: "PHI" });
+    expect(sched.data.games[0]).toMatchObject({ away: "NYG", home: "PHI", status: "scheduled" });
     expect(sched.data.teams_on_bye).toContain("BUF");
 
     const activity = await call(client, "get_league_activity");
@@ -243,6 +264,9 @@ describe("MCP server end to end", () => {
 
     const txs = await call(client, "get_transactions", { only_mine: true, only_pending: true });
     expect(txs.data.transactions.map((x: any) => x.id).sort()).toEqual(["tx-trade-1", "tx-waiver-1"]);
+    expect(txs.data.transactions.find((x: any) => x.id === "tx-trade-1").note).toMatch(/respond before/);
+    const standings = await call(client, "get_standings");
+    expect(standings.data.standings[0]).toMatchObject({ rank: 1, name: "Dragon Dynasty", playoff_seed: 1 });
     await client.close();
   });
 

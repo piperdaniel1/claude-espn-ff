@@ -53,7 +53,14 @@ season, `11{season}{week}` projected week, `02{season}` last 7 days.
 `player.stats[]` entries are keyed by `seasonId`, `scoringPeriodId`,
 `statSourceId` (0 actual, 1 projected) and `statSplitTypeId` (0 season total,
 1 single scoring period). `appliedTotal` is fantasy points under the league's
-scoring; `appliedAverage` is per game.
+scoring; `appliedAverage` is per game. The projected season total
+(`statSourceId 1`, `statSplitTypeId 0`) behaves like a rest-of-season number
+once the season is under way (it can be lower than points already scored), so
+the tools expose it as `ros_proj`.
+
+Live scores: `schedule[].home.totalPoints` stays 0 until a matchup period is
+over. For the current week the tools sum the starters' actual points from
+`mRoster` (and use `totalPointsLive` when ESPN includes it).
 
 ### Ids
 

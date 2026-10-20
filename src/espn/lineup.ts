@@ -225,8 +225,8 @@ export function planLineup(players: LineupCandidate[], startingSlotCounts: Recor
       locked: true,
       note: note ? `${note} (locked)` : "locked",
     });
-    if (effectiveProjection(f.player) === 0) {
-      warnings.push(`${f.player.name} is locked into ${slotName(f.slot)} but is ${note ?? "unavailable"}; nothing can be done this week.`);
+    if (effectiveProjection(f.player) === 0 && note) {
+      warnings.push(`${f.player.name} is locked into ${slotName(f.slot)} but is ${note}; nothing can be done this week.`);
     }
   }
   starters.sort((a, b) => a.slot - b.slot);
@@ -251,9 +251,12 @@ export function planLineup(players: LineupCandidate[], startingSlotCounts: Recor
   }
 
   for (const s of starters) {
-    if (s.playerId !== null && s.effective === 0 && !s.locked) {
-      warnings.push(`${s.name} is starting at ${s.slotName} while ${s.note ?? "unavailable"}; no healthy alternative is eligible. Consider a free agent.`);
-    } else if (s.note === "doubtful" && !s.locked) {
+    if (s.playerId === null || s.locked) continue;
+    if (s.effective === 0 && s.note) {
+      warnings.push(`${s.name} is starting at ${s.slotName} while ${s.note}; no healthy alternative is eligible. Consider a free agent.`);
+    } else if (s.effective === 0) {
+      warnings.push(`${s.name} (${s.slotName}) has no ESPN projection for this week; check whether they are expected to play.`);
+    } else if (s.note === "doubtful") {
       warnings.push(`${s.name} (${s.slotName}) is doubtful; check for a healthier option or late news.`);
     }
   }
